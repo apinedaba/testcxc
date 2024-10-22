@@ -1,0 +1,113 @@
+from flask import Flask, request, jsonify
+import psycopg2
+import pandas as pd
+import hashlib
+
+app = Flask(__name__)
+
+def get_db_connection():
+    conn = psycopg2.connect(
+        host="db",
+        database="postgres",
+        user="postgres",
+        password="password"
+    )
+    return conn
+
+def create_tables():
+    print("creando tablas")
+    conn = get_db_connection()
+    cur = conn.cursor()
+    with open('ejercicio_ddl.txt', 'r') as f:
+        ddl_script = f.read()
+        cur.execute(ddl_script)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+@app.route('/load_catalogs', methods=['POST'])
+def load_catalogs():
+    types = ("csv", "xslx")
+    if 'file' not in request.files.keys():
+        return  jsonify({
+            "response":"No hay archivo",
+            "data":request.files['file'].filename,
+            "status_code":400
+        }), 400
+    catalog_file = request.files['file']
+    if catalog_file.filename.endswith(types) is not True:
+        return  jsonify({
+            "response":"El archivo no es de un formato permitido",
+            "status_code":400
+        }), 400
+    df = pd.read_csv(catalog_file)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    catalogs = {
+        'agency_name': 'test.agency',
+        'class_title': 'test.profession',
+        'ethnicity': 'test.ethnicity',
+        'gender': 'test.gender'
+    }
+    
+    for column, table in catalogs.items():
+        for value in df[column].unique():
+            cur.execute(f"INSERT INTO {table} (name) VALUES (%s) ON CONFLICT DO NOTHING", (value,))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return jsonify({"status": "success"})
+
+@app.route('/load_employees', methods=['POST'])
+def load_employees():
+    types = ("csv", "xslx")    
+    if 'file' not in request.files.keys():
+        return  jsonify({
+            "response":"No hay archivo",
+            "data":request.files['file'].filename,
+            "status_code":400
+        }), 400
+    employee_file = request.files['file']
+    if employee_file.filename.endswith(types) is not True:
+        return  jsonify({
+            "response":"El archivo no es de un formato permitido",
+            "status_code":400
+        }), 400
+    df = pd.read_csv(employee_file)
+    
+    conn = get_db_connection()
+    cur = conn.cursor()    
+    for chunk in range(0, len(df), 10000):
+        batch = df[chunk:chunk+10000]
+        for _, row in batch.iterrows():
+            cur.execute("SELECT id FROM test.agency WHERE name = %s", (row['agency_name'],))
+            agency_id = cur.fetchone()[0]
+            
+            cur.execute("SELECT id FROM test.profession WHERE name = %s", (row['class_title'],))
+            profession_id = cur.fetchone()[0]
+            
+            cur.execute("SELECT id FROM test.ethnicity WHERE name = %s", (row['ethnicity'],))
+            ethnicity_id = cur.fetchone()[0]
+            
+            cur.execute("SELECT id FROM test.gender WHERE name = %s", (row['gender'],))
+            gender_id = cur.fetchone()[0]
+            print(row)
+            md5_hash = hashlib.md5(f"{row['name']}{row['last_name']}{profession_id}{ethnicity_id}{gender_id}".encode()).hexdigest()
+            
+            cur.execute("""
+                INSERT INTO test.employee (name, last_name,monthly_salary, agency_id, profession_id, ethnicity_id, gender_id, md5)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (md5) DO NOTHING
+            """, (row['name'], row['last_name'], row['montly'],agency_id, profession_id, ethnicity_id, gender_id, md5_hash))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return jsonify({"status": "success"})
+
+if __name__ == 'app':
+    create_tables()
+    app.run(host='0.0.0.0')
